@@ -1,0 +1,159 @@
+import ollama
+import chromadb
+from chromadb.config import Settings  # Import Settings to silence errors
+import fitz
+import os
+
+# --- 1. Configuration ---
+EMBEDDING_MODEL = 'mxbai-embed-large'
+LANGUAGE_MODEL = 'llama3'
+
+SOURCE_DIR = "research_papers"
+CHROMA_DB_PATH = "./chroma_db"
+COLLECTION_NAME = "research_papers_db"
+
+
+# --- CUSTOM CHUNKING FUNCTION ---
+def split_text_into_chunks(text, chunk_size=1000, chunk_overlap=200):
+    if len(text) <= chunk_size:
+        return [text]
+
+    chunks = []
+    start_index = 0
+    while start_index < len(text):
+        end_index = start_index + chunk_size
+        if end_index >= len(text):
+            chunks.append(text[start_index:])
+            break
+
+        chunk_text = text[start_index:end_index]
+        last_space_index = -1
+        for i in range(len(chunk_text) - 1, -1, -1):
+            if chunk_text[i].isspace():
+                last_space_index = i
+                break
+
+        if last_space_index != -1:
+            actual_end_index = start_index + last_space_index
+        else:
+            actual_end_index = end_index
+
+        chunks.append(text[start_index:actual_end_index])
+        start_index += (actual_end_index - start_index) - chunk_overlap
+        if start_index < 0:
+            start_index = actual_end_index
+
+    return chunks
+
+
+# --- 2. Document Processing & Embedding ---
+
+def process_and_embed_pdf(file_path, collection):
+    print(f"Processing {file_path}...")
+    try:
+        doc = fitz.open(file_path)
+        full_text = "".join(page.get_text() for page in doc)
+        doc.close()
+
+        chunks = split_text_into_chunks(full_text)
+
+        chunk_ids = [f"{os.path.basename(file_path)}-{i}" for i, _ in enumerate(chunks)]
+
+        existing_ids = set(collection.get(ids=chunk_ids)['ids'])
+        new_chunks = [chunk for i, chunk in enumerate(chunks) if chunk_ids[i] not in existing_ids]
+        new_chunk_ids = [id for id in chunk_ids if id not in existing_ids]
+
+        if not new_chunks:
+            print(f"All chunks from {file_path} are already in the database.")
+            return
+
+        print(f"Found {len(new_chunks)} new chunks to add for {file_path}.")
+
+        for i, chunk in enumerate(new_chunks):
+            # Print progress every 10 chunks to avoid spamming console
+            if i % 10 == 0:
+                print(f"Embedding chunk {i + 1}/{len(new_chunks)}...")
+
+
+            response = ollama.embed(model=EMBEDDING_MODEL, input=chunk)
+            embedding = response['embeddings'][0]
+
+            collection.add(
+                ids=[new_chunk_ids[i]],
+                embeddings=[embedding],
+                documents=[chunk],
+                metadatas=[{"source": os.path.basename(file_path)}]
+            )
+        print(f"Finished processing {file_path}.")
+
+    except Exception as e:
+        print(f"Error processing {file_path}: {e}")
+
+
+# --- 3. Setup and Main Logic ---
+
+# Initialize ChromaDB with telemetry disabled to stop the error logs
+client = chromadb.PersistentClient(
+    path=CHROMA_DB_PATH,
+    settings=Settings(anonymized_telemetry=False)
+)
+collection = client.get_or_create_collection(name=COLLECTION_NAME)
+
+if not os.path.exists(SOURCE_DIR):
+    os.makedirs(SOURCE_DIR)
+    print(f"Created directory {SOURCE_DIR}. Please add your research papers there.")
+
+pdf_files = [f for f in os.listdir(SOURCE_DIR) if f.endswith(".pdf")]
+for pdf_file in pdf_files:
+    process_and_embed_pdf(os.path.join(SOURCE_DIR, pdf_file), collection)
+
+
+def retrieve(query, top_n=5):
+    # --- FIX APPLIED HERE ---
+    response = ollama.embed(model=EMBEDDING_MODEL, input=query)
+    query_embedding = response['embeddings'][0]
+
+    results = collection.query(query_embeddings=[query_embedding], n_results=top_n)
+    return results['documents'][0]
+
+
+def main_chat_loop():
+    print("\n--- Research Chatbot Ready (LangChain-Free) ---")
+    while True:
+        input_query = input('\nAsk a question (or type "exit"): ')
+        if input_query.lower() == 'exit':
+            break
+
+        retrieved_knowledge = retrieve(input_query)
+
+        print('\nRetrieved context:')
+        for doc in retrieved_knowledge:
+            print(f" - {doc[:100].replace(chr(10), ' ')}...")
+
+        formatted_knowledge = "\n".join([f"- {chunk}" for chunk in retrieved_knowledge])
+
+        instruction_prompt = f"""You are a helpful research assistant.
+Use only the following context from research papers to answer the question.
+Do not make up any new information. If the context does not contain the answer, say "I don't have enough information from the documents to answer that."
+
+Context:
+{formatted_knowledge}
+"""
+
+        print('\nChatbot response:')
+        stream = ollama.chat(
+            model=LANGUAGE_MODEL,
+            messages=[
+                {'role': 'system', 'content': instruction_prompt},
+                {'role': 'user', 'content': input_query},
+            ],
+            stream=True,
+        )
+
+        for chunk in stream:
+            print(chunk['message']['content'], end='', flush=True)
+        print("\n" + "=" * 50)
+
+
+if __name__ == "__main__":
+    main_chat_loop()
