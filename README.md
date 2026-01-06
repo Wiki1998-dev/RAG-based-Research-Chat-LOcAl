@@ -1,135 +1,226 @@
 ***
 
-# Research Paper RAG Chatbot
-A completely local, transparent Retrieval-Augmented Generation (RAG) system designed for querying research papers. This project allows you to ingest PDF documents, store their semantic meaning, and chat with them using local LLMs.
+# RAG System for Research Papers (Ollama + ChromaDB)
 
-**The system is intentionally LangChain-free to maintain full transparency, easy debugging, and granular control over every step of the pipeline.**
+This project implements a modular Retrieval-Augmented Generation (RAG) system for querying research papers stored as PDFs.
+
+Unlike a monolithic script, this system is structured using clear responsibilities and software design patterns. It runs fully locally using **Ollama** for embeddings and language models, **ChromaDB** for persistent vector storage, and **PyMuPDF** for PDF parsing.
 
 ## Overview
 
-This tool enables you to:
-*   **Ingest** PDF research papers.
-*   **Split** text into manageable chunks with overlap.
-*   **Embed** chunks into vectors using a local embedding model.
-*   **Store** vectors in a persistent local database.
-*   **Retrieve** the most relevant context based on user queries.
-*   **Generate** answers strictly grounded in the provided documents.
+The system is designed to be easier to understand, debug, extend, and maintain than typical single-file RAG scripts.
 
-## High-Level Architecture
+**High-Level Flow:**
+1.  **Ingest:** PDFs are loaded, text is extracted, and split into chunks.
+2.  **Embed:** Chunks are converted into vectors and stored in a persistent database.
+3.  **Retrieve:** User queries are embedded to find relevant text chunks.
+4.  **Generate:** The language model answers the query using *only* the retrieved context.
 
-The system consists of five distinct conceptual layers. Each layer is implemented explicitly and can be modified independently:
+## Core Design Principles
 
-1.  **Document Ingestion:** Loading PDFs and extracting raw text.
-2.  **Text Chunking:** Splitting text into semantic segments.
-3.  **Embedding Generation:** Converting text to vector representations.
-4.  **Vector Storage & Retrieval:** Persisting data and finding nearest neighbors.
-5.  **LLM Generation:** Synthesizing answers from retrieved context.
+*   **Single Responsibility:** Each class and module does exactly one thing.
+*   **Explicit Data Flow:** There is no hidden logic or "magic" state management.
+*   **No Framework Magic:** The system is built without heavy abstractions like LangChain to ensure full transparency.
+*   **Observability:** Retrieved chunks are printed to the console so you can verify exactly what the LLM is reading.
 
-## Tech Stack & Models
+## Architecture
 
-*   **Language:** Python
-*   **LLM Host:** [Ollama](https://ollama.com/)
-*   **Embedding Model:** `mxbai-embed-large`
-*   **Generation Model:** `llama3`
-*   **Vector Database:** [ChromaDB](https://www.trychroma.com/) (Local, persistent)
-*   **PDF Parsing:** `PyMuPDF` (fitz)
+### System Architecture
+
+```text
+┌──────────────────────┐
+│      User Input      │
+│  (Natural Language)  │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│   ResearchAssistant  │
+│  (chat/assistant.py) │
+│                      │
+│ - prints retrieved   │
+│   chunks             │
+│ - builds prompt      │
+│ - calls LLM          │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│      Retriever       │
+│ (retrieval/retriever)│
+│                      │
+│ - embeds query       │
+│ - requests top-K     │
+│   matches            │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│     Vector Store     │
+│ (vectorstores/chroma)│
+│                      │
+│ - similarity search  │
+│ - returns chunks     │
+│   + metadata         │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│      Embeddings      │
+│ (ollama_embedder.py) │
+│                      │
+│ - text → vectors     │
+│ - shared for ingest  │
+│   & query            │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│     ChromaDB         │
+│  (Persistent Store)  │
+│                      │
+│ - embeddings         │
+│ - chunk text         │
+│ - metadata           │
+└──────────────────────┘
+```
+
+### Ingestion Pipeline
+
+```text
+┌──────────────┐
+│   PDF File   │
+└──────┬───────┘
+       │
+       ▼
+┌──────────────────┐
+│   PDF Loader     │
+│ (pdf_loader.py)  │
+│                  │
+│ - extract text   │
+└──────┬───────────┘
+       │
+       ▼
+┌──────────────────┐
+│    Chunker       │
+│ (chunker.py)     │
+│                  │
+│ - overlapping    │
+│   chunks         │
+└──────┬───────────┘
+       │
+       ▼
+┌──────────────────┐
+│    Embedder      │
+│ (Ollama)         │
+│                  │
+│ - chunk → vector │
+└──────┬───────────┘
+       │
+       ▼
+┌──────────────────┐
+│   Vector Store   │
+│ (ChromaDB)       │
+│                  │
+│ - persist data   │
+└──────────────────┘
+```
 
 ## Project Structure
 
+Each folder corresponds to one specific responsibility in the RAG pipeline.
+
 ```text
-.
-├── research_papers/         # Place your PDF files here
-├── chroma_db/               # Persistent Vector Database storage
-├── main.py                  # Main application script
-├── requirements.txt         # Python dependencies
-└── README.md                # Project documentation
+RAG/
+│
+├── main.py                  # Entry point: wires components together
+├── config.py                # Configuration: constants, paths, model names
+│
+├── ingestion/
+│   ├── pdf_loader.py        # Handles PDF parsing via PyMuPDF
+│   └── chunker.py           # Logic for text splitting and overlap
+│
+├── embeddings/
+│   └── ollama_embedder.py   # Wrapper for Ollama embedding models
+│
+├── vectorstores/
+│   └── chroma.py            # Wrapper for ChromaDB persistence
+│
+├── retrieval/
+│   └── retriever.py         # Logic for querying the vector store
+│
+└── chat/
+    └── assistant.py         # Handles user interaction and LLM prompting
 ```
 
-## How It Works (Core Components)
+## Component Details
 
-### 1. PDF Loading & Text Extraction
-**Library:** `PyMuPDF (fitz)`
+### Configuration (`config.py`)
+Centralizes all constants including model names, directory paths, chunk sizes, and collection names. This prevents "magic values" from being scattered across the codebase.
 
-The system reads PDFs sequentially, page by page. The extracted text is concatenated into a single string. This approach preserves reading order and avoids issues often caused by complex PDF layouts.
+### PDF Loading (`ingestion/pdf_loader.py`)
+*   **Responsibility:** Load PDFs and extract raw text.
+*   **Method:** Uses `PyMuPDF` to read pages sequentially and returns a single string per document.
+*   **Reasoning:** PDF parsing is fragile; keeping it isolated avoids cross-contamination of logic.
 
-### 2. Text Chunking
-**Strategy:** Sliding Window
-*   **Chunk Size:** ~1000 characters
-*   **Overlap:** 200 characters
-*   **Splitter:** Splits at whitespace to avoid breaking words.
+### Chunking (`ingestion/chunker.py`)
+*   **Responsibility:** Split raw text into overlapping chunks.
+*   **Strategy:** Fixed chunk size with overlapping windows, splitting at whitespace to preserve words.
+*   **Reasoning:** Overlap prevents context loss at chunk boundaries, improving retrieval accuracy.
 
-*Why overlap?* It prevents loss of meaning at the boundaries of chunks and improves retrieval accuracy for queries that span multiple sentences.
+### Embedding Layer (`embeddings/ollama_embedder.py`)
+*   **Responsibility:** Convert text into vectors using Ollama.
+*   **Abstraction:** Provides a standard `embed(text)` method. This allows you to swap the embedding provider (e.g., to OpenAI or HuggingFace) without breaking the rest of the app.
 
-### 3. Embedding Generation
-**Library:** `ollama.embed`
+### Vector Store (`vectorstores/chroma.py`)
+*   **Responsibility:** Persist embeddings and perform similarity searches.
+*   **Storage:** Uses ChromaDB to store documents, embeddings, and metadata.
+*   **Incremental Loading:** Checks for existing IDs before insertion to prevent duplicates.
 
-Each text chunk is converted into a high-dimensional vector. We extract the embedding directly from the `response['embeddings'][0]`, ensuring every chunk has a unique vector representation for semantic search.
+### Retriever (`retrieval/retriever.py`)
+*   **Responsibility:** Perform the actual semantic search.
+*   **Behavior:** Embeds the user query, queries the vector store, and returns the top-K results.
+*   **Note:** No filtering or thresholding is applied at this stage to ensure total observability of what the database considers "relevant."
 
-### 4. Vector Database (ChromaDB)
-**Library:** `chromadb`
-
-Chunks are stored with:
-*   **ID:** `filename-chunk_index`
-*   **Embedding:** Vector data
-*   **Document:** Raw text content
-*   **Metadata:** Source filename
-
-**Incremental Ingestion:** Before processing, the system checks existing IDs. Only new chunks are embedded and stored, allowing you to add new PDFs without re-processing the entire dataset.
-
-### 5. Retrieval & Context Construction
-**Function:** `retrieve(query, top_n)`
-
-1.  The user query is embedded using the same model (`mxbai-embed-large`).
-2.  ChromaDB performs a similarity search to find the `top_n` most similar chunks.
-3.  **No filtering or distance thresholds are applied.** All retrieved chunks are passed to the LLM to ensure maximum context visibility.
-
-### 6. Interactive Chat & Generation
-**Model:** `llama3`
-
-The retrieved text chunks are concatenated into a single context block. The system prompt explicitly instructs the model to:
-1.  Use **only** the provided context.
-2.  Admit when the context is insufficient.
-3.  Never invent information.
-
-Answers are streamed in real-time to reduce perceived latency.
-
-## Design Philosophy
-
-### Why No LangChain?
-Many RAG tutorials rely on LangChain, which often abstracts away the critical mechanics of retrieval and prompt construction. This project is built without it to ensure:
-
-*   **Full Visibility:** You see exactly how text is chunked, embedded, and retrieved.
-*   **No Hidden Abstractions:** There is no "magic" happening behind the scenes.
-*   **Easier Debugging:** If the retrieval is poor, you know exactly where to look (chunk size, overlap, or embedding model).
-*   **Performance:** A lighter weight application with fewer dependencies.
-
-### Behavior Guarantees
-*   The system always retrieves `top_n` chunks.
-*   It explicitly prints retrieved context to the console for transparency.
-*   It does not suppress answers based on arbitrary confidence scores.
+### Chat Assistant (`chat/assistant.py`)
+*   **Responsibility:** Orchestrate the interaction.
+*   **Process:**
+    1.  Receives user input.
+    2.  Calls the retriever.
+    3.  Prints the retrieved chunks to the console (for debugging/preview).
+    4.  Constructs a prompt that strictly enforces "answer using only the provided context."
+    5.  Streams the LLM response.
 
 ## Usage
 
-1.  **Install Dependencies:**
+1.  **Prerequisites:**
+    *   Python 3.8+
+    *   Ollama installed and running
+
+2.  **Install Dependencies:**
     ```bash
     pip install chromadb pymupdf ollama
     ```
 
-2.  **Pull Ollama Models:**
-    Ensure Ollama is installed and running, then pull the required models:
+3.  **Pull Models:**
     ```bash
     ollama pull mxbai-embed-large
     ollama pull llama3
     ```
 
-3.  **Add Documents:**
-    Place your PDF research papers in the `research_papers/` directory.
+4.  **Add Documents:**
+    Place your PDF research papers in the configured `research_papers/` directory.
 
-4.  **Run the Application:**
+5.  **Run:**
     ```bash
     python main.py
     ```
-    *The first run will take longer as it embeds the PDFs. Subsequent runs will be instant due to the persistent ChromaDB storage.*
 
-5.  **Chat:**
-    Enter your query when prompted. Type `exit` to quit.
+## Extensibility
+
+Because of the modular structure, this system is easily extensible. You can add the following features without rewriting the core logic:
+
+*   **Strict RAG:** Add a distance threshold filter in the `Retriever` class.
+*   **Re-ranking:** Insert a re-ranking model (like Cross-Encoder) in the `Retriever` before returning results.
+*   **Multi-Modal:** Swap `pdf_loader.py` for a loader that handles images or markdown.
+*   **Citation:** Modify `assistant.py` to parse metadata and provide citations in the final answer.
